@@ -31,10 +31,10 @@ namespace hft {
  * by redirecting to another ThreadId, letting previous thread process its incoming orders
  * meanwhile working on another queues, once OrderBook is free, new thread takes over
  */
-template <typename LoadBalancer, typename... EventTypes>
+template <typename EventConsumer, typename... EventTypes>
 class PartitionEventSink {
 public:
-  using Balancer = LoadBalancer;
+  using Consumer = EventConsumer;
 
   PartitionEventSink() : mEFds(Config().cfg.coresApp.size()) {
     const auto threads = Config().cfg.coresApp.size();
@@ -44,6 +44,8 @@ public:
   }
 
   ~PartitionEventSink() { stop(); }
+
+  void setConsumer(Consumer *consumer) { mConsumer = consumer; }
 
   void start() {
     if (Config::cfg.coresApp.empty()) {
@@ -70,10 +72,11 @@ public:
   }
 
   void stop() {
-    if (mStop.load()) {
+    spdlog::trace("Stoping PartitionEventSink");
+    if (mStop.test()) {
       return;
     }
-    mStop.store(true);
+    mStop.test_and_set();
     for (auto &fd : mEFds) {
       fd.notify();
     }
@@ -85,15 +88,10 @@ public:
   }
 
   template <typename EventType>
-  void setHandler(SpanHandler<EventType> &&handler) {
-    getHandler<EventType>() = std::move(handler);
-  }
-
-  template <typename EventType>
   void post(const EventType &event) {
-    auto id = LoadBalancer::getWorkerId(event);
-    if (id == std::numeric_limits<uint8_t>::max()) {
-      spdlog::error("Ticker not found: {}", utils::toString(event));
+    auto id = mConsumer->getWorkerId(event);
+    if (id == std::numeric_limits<ThreadId>::max()) {
+      spdlog::error("Unknown event");
       return;
     }
     auto &queue = getQueue<EventType>(id);
@@ -113,7 +111,7 @@ public:
 private:
   void processEvents() {
     mEFds[mThreadId].wait();
-    while (!mStop.load()) {
+    while (!mStop.test()) {
       (processQueue<EventTypes>(mThreadId), ...);
       mEFds[mThreadId].wait([this]() { return !isTupleEmpty(mEventQueues[mThreadId]); });
     }
@@ -131,7 +129,7 @@ private:
     while (buffer.size() < LFQ_POP_LIMIT && queue.pop(event)) {
       buffer.emplace_back(event);
     }
-    getHandler<EventType>()(Span<EventType>(buffer));
+    mConsumer->onEvent(mThreadId, Span<EventType>(buffer));
   }
 
   template <typename EventType>
@@ -140,24 +138,19 @@ private:
     return *std::get<UPtrLFQueue<EventType>>(tupl);
   }
 
-  template <typename EventType>
-  SpanHandler<EventType> &getHandler() {
-    return std::get<SpanHandler<EventType>>(mEventHandlers);
-  }
-
 private:
+  Consumer *mConsumer;
   // Every thread has its own tuple with queues for events
   std::vector<std::tuple<UPtrLFQueue<EventTypes>...>> mEventQueues;
-  std::tuple<SpanHandler<EventTypes>...> mEventHandlers;
   std::vector<std::thread> mThreads;
   std::vector<EventFd> mEFds;
 
   static thread_local ThreadId mThreadId;
-  std::atomic_bool mStop{false};
+  std::atomic_flag mStop = ATOMIC_FLAG_INIT;
 };
 
-template <typename LoadBalancer, typename... EventTypes>
-thread_local ThreadId PartitionEventSink<LoadBalancer, EventTypes...>::mThreadId = 0;
+template <typename EventConsumer, typename... EventTypes>
+thread_local ThreadId PartitionEventSink<EventConsumer, EventTypes...>::mThreadId = 0;
 
 } // namespace hft
 

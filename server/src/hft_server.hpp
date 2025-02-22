@@ -24,15 +24,16 @@ public:
   }
 
   void start() {
+    spdlog::trace("Start HftServer");
     mSink.dataSink.start();
     mSink.controlSink.start();
     mNetwork.start();
-    mAggregator.start();
     // Run io context along with other threads
     mSink.ioSink.start();
   }
 
   void stop() {
+    spdlog::trace("Stop HftServer");
     mSink.ctx().stop();
     mSink.dataSink.stop();
   }

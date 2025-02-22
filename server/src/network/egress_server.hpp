@@ -39,17 +39,17 @@ public:
 
   template <typename MessageType>
   void send(Span<MessageType> messages) {
+    spdlog::trace("EgressServer::send {} messages", messages.size());
     std::sort(messages.begin(), messages.end(), TraderIdCmp<MessageType>{});
 
-    size_t cursor = 0;
     auto [subSpan, leftover] = frontSubspan(messages, TraderIdCmp<MessageType>{});
     while (!subSpan.empty()) {
       auto conn = mConnections.find(subSpan.front().traderId);
-      if (conn == mConnections.end()) {
-        spdlog::debug("Trader {} is offline", subSpan.front().traderId);
-        continue;
+      if (conn != mConnections.end()) {
+        conn->second->asyncWrite(subSpan);
+      } else {
+        spdlog::trace("Trader {} is offline", [&subSpan] { return subSpan.front().traderId; }());
       }
-      conn->second->asyncWrite(subSpan);
       std::tie(subSpan, leftover) = frontSubspan(leftover, TraderIdCmp<MessageType>{});
     }
   }

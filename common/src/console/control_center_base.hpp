@@ -58,27 +58,32 @@ private:
     while (cmdRes.ok()) {
       auto cmd = cmdRes.value();
       spdlog::info(utils::toString(cmd));
-      mSink.controlSink.onCommand(cmd);
       switch (cmd) {
       case Command::MonitorModeStart:
+        spdlog::info("monitor mode on");
         Config::cfg.monitorStats = true;
         switchMode(true);
         break;
       case Command::MonitorModeStop:
+        spdlog::info("monitor mode off");
         Config::cfg.monitorStats = false;
         switchMode(false);
         break;
       case Command::MonitorModeSwitch:
+        spdlog::info("monitor mode {}", mMonitorMode ? "off" : "on");
         Config::cfg.monitorStats = !mMonitorMode;
         switchMode(!mMonitorMode);
         break;
       case Command::LogLevelUp:
         LoggerManager::switchLogLevel(true);
+        spdlog::info("log level {}", utils::toString(spdlog::get_level()));
         break;
       case Command::LogLevelDown:
         LoggerManager::switchLogLevel(false);
+        spdlog::info("log level {}", utils::toString(spdlog::get_level()));
         break;
       default:
+        mSink.controlSink.onCommand(cmd);
         break;
       }
       cmdRes = mConsoleParser.getCommand();

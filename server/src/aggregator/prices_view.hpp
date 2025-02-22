@@ -58,7 +58,7 @@ public:
 
   Price getPrice(TickerRef ticker) {
     if (!mData.contains(ticker)) {
-      spdlog::error("Ticker not found {}", utils::toStrView(ticker));
+      spdlog::error("Ticker not found {}", [&ticker] { return utils::toStrView(ticker); }());
       return 0;
     }
     return mData.at(ticker).currentPrice;
@@ -66,7 +66,7 @@ public:
 
   void setPrice(const TickerPrice &price) {
     if (!mData.contains(price.ticker)) {
-      spdlog::error("Ticker not found {}", utils::toStrView(price.ticker));
+      spdlog::error("Ticker not found {}", [&price] { return utils::toStrView(price.ticker); }());
       return;
     }
     mData.at(price.ticker).currentPrice = price.price;

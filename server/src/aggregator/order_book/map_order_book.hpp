@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -21,70 +22,55 @@
 namespace hft::server {
 
 /**
- * @brief For simulation sake if order not matched immediately TraderId gets changed
- * to simulate lots of traders and not polute client side statistics with filled orders
- * that were placed 5 seconds ago
- * Performing significantly better then the one upstairs
+ * @brief
  */
 class MapOrderBook {
 public:
   using MatchHandler = SpanHandler<OrderStatus>;
   using UPtr = std::unique_ptr<MapOrderBook>;
 
-  MapOrderBook() = delete;
-  MapOrderBook(Ticker ticker, MatchHandler matcher)
-      : mTicker{ticker}, mHandler{std::move(matcher)} {
-    assert(mHandler != nullptr);
-    mMatchesBuffer.reserve(20);
-  }
+  MapOrderBook() = default;
+  ~MapOrderBook() = default;
+
+  inline bool acquire() { return !mBusy.test_and_set(std::memory_order_acq_rel); }
+  inline void release() { mBusy.clear(std::memory_order_acq_rel); }
+  inline size_t ordersCount() const { return mOrdersCurrent.load(std::memory_order_relaxed); }
 
   void add(Span<Order> orders) {
-    mOrdersCurrent.fetch_add(1);
-    bool matchingNeeded{false};
-    // TODO() Remove later, this is optimization for the current test setup
-    // Only the best order gets notification
-    TraderId matchingId;
+    spdlog::trace("MapOrderBook::add {} orders", orders.size());
     for (auto &order : orders) {
+      mOrdersCurrent.fetch_add(1);
       if (order.action == OrderAction::Buy) {
         if (mBids.size() > ORDER_BOOK_LIMIT) {
-          spdlog::error("Order limit reached for {}", utils::toStrView(mTicker));
+          spdlog::error("Limit reached {}", [&order] { return utils::toStrView(order.ticker); }());
           continue;
-        }
-        // If bid is lower then current best bid - we can skip matching
-        if (mBids.empty() || order.price > mBids.begin()->first) {
-          matchingNeeded = true;
-          matchingId = order.id;
         }
         auto &priceBids = mBids[order.price];
         if (priceBids.empty()) { // Was just created
           priceBids.reserve(ORDER_BOOK_LIMIT);
         }
-        priceBids.push_back(order);
+        priceBids.emplace_back(order);
+        mLastAdded.insert(order.id);
       } else {
         if (mAsks.size() > ORDER_BOOK_LIMIT) {
-          spdlog::error("Order limit reached for {}", utils::toStrView(mTicker));
+          spdlog::error("Limit reached {}", [&order] { return utils::toStrView(order.ticker); }());
           return;
-        }
-        if (mAsks.empty() || order.price < mAsks.begin()->first) {
-          matchingNeeded = true;
-          matchingId = order.id;
         }
         auto &priceBids = mAsks[order.price];
         if (priceBids.empty()) {
           priceBids.reserve(ORDER_BOOK_LIMIT);
         }
-        priceBids.push_back(order);
+        priceBids.emplace_back(order);
+        mLastAdded.insert(order.id);
       }
-    }
-    if (matchingNeeded) {
-      match(matchingId);
     }
   }
 
-  /**
-   * @brief Simulate tracking active users with passing order id
-   */
-  void match(OrderId activeOrder) {
+  /* Randomizator */
+  std::vector<OrderStatus> match() {
+    spdlog::trace("MapOrderBook::match");
+    std::vector<OrderStatus> matches;
+    matches.reserve(10); // TODO
     while (!mBids.empty() && !mAsks.empty()) {
       auto &bestBids = mBids.begin()->second;
       auto &bestAsks = mAsks.begin()->second;
@@ -100,8 +86,12 @@ public:
       bestBid.quantity -= quantity;
       bestAsk.quantity -= quantity;
 
-      onOrderMatched(bestBid, quantity, bestAsk.price, activeOrder);
-      onOrderMatched(bestAsk, quantity, bestAsk.price, activeOrder);
+      if (mLastAdded.contains(bestBid.id)) {
+        matches.emplace_back(orderMatch(bestBid, quantity, bestAsk.price));
+      }
+      if (mLastAdded.contains(bestAsk.id)) {
+        matches.emplace_back(orderMatch(bestAsk, quantity, bestAsk.price));
+      }
 
       if (bestBid.quantity == 0) {
         bestBids.pop_back();
@@ -116,17 +106,12 @@ public:
         }
       }
     }
-    mHandler(Span<OrderStatus>{mMatchesBuffer});
-    mMatchesBuffer.clear();
+    mLastAdded.clear();
+    return matches;
   }
 
-  inline size_t ordersCount() const { return mOrdersCurrent.load(); }
-
 private:
-  void onOrderMatched(const Order &order, Quantity quantity, Price price, OrderId activeOrder) {
-    if (order.id != activeOrder) {
-      return;
-    }
+  OrderStatus orderMatch(const Order &order, Quantity quantity, Price price) {
     OrderStatus status;
     status.id = order.id;
     status.quantity = quantity;
@@ -135,20 +120,20 @@ private:
     status.action = order.action;
     status.traderId = order.traderId;
     status.ticker = order.ticker;
-    spdlog::info(utils::toString(status));
-    mMatchesBuffer.emplace_back(status);
+    spdlog::info([&status] { return utils::toString(status); }());
     if (order.quantity == 0) {
       mOrdersCurrent.fetch_sub(1);
     }
+    return status;
   }
 
 private:
+  // TODO try flat_map
   std::map<uint32_t, std::vector<Order>, std::greater<uint32_t>> mBids;
   std::map<uint32_t, std::vector<Order>> mAsks;
+  std::set<OrderId> mLastAdded; // RANDOMIZATOR
 
-  Ticker mTicker;
-  MatchHandler mHandler;
-  std::vector<OrderStatus> mMatchesBuffer;
+  std::atomic_flag mBusy = ATOMIC_FLAG_INIT;
 
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> mOrdersCurrent;
 };

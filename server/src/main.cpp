@@ -7,12 +7,13 @@
 #include "config/config_reader.hpp"
 #include "hft_server.hpp"
 #include "logger_manager.hpp"
+#include "template_types.hpp"
 #include "utils/string_utils.hpp"
 
 int main() {
   try {
     using namespace hft;
-    LoggerManager::initialize(LoggerManager::LoggerMode::Console, spdlog::level::debug);
+    LoggerManager::initialize(LoggerManager::LoggerMode::Console, spdlog::level::trace);
     ConfigReader::readConfig("server_config.ini");
 
     spdlog::info("Server configuration:");

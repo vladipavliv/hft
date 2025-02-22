@@ -76,6 +76,7 @@ public:
 
   template <typename MessageTypeOut>
   void asyncWrite(Span<MessageTypeOut> msgVec) {
+    spdlog::trace("Socket::asyncWrite {} messages", msgVec.size());
     if (!mSocket.is_open()) {
       spdlog::error("Failed to write to the socket: not opened");
       return;

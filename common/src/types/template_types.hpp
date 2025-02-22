@@ -47,11 +47,12 @@ std::pair<Span<Type>, Span<Type>> frontSubspan(Span<Type> input, Cmp cmp = Cmp{}
   if (input.size() < 2) {
     return std::make_pair(input, Span<Type>());
   }
-  size_t end = 0;
-  while (end < input.size() && cmp(input.front(), input[end])) {
+  const auto base = input.front();
+  size_t end = 1;
+  while (end < input.size() && cmp(base, input[end]) && cmp(input[end], base)) {
     ++end;
   }
-  return std::make_pair(input.subspan(0, end), input.subspan(end, input.size()));
+  return std::make_pair(input.subspan(0, end), input.subspan(end, input.size() - end));
 }
 
 /**

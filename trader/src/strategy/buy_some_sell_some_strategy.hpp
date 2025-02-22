@@ -42,18 +42,22 @@ public:
 
 private:
   void priceUpdate(Span<TickerPrice> prices) {
-    std::string pricesStr;
-    for (auto &price : prices) {
-      pricesStr += utils::toString(price) + " ";
-    }
-    spdlog::info("PriceUpdate: {}", pricesStr);
+    spdlog::info("PriceUpdate: {}", [&prices] {
+      std::string pricesUpdate;
+      for (auto price : prices) {
+        pricesUpdate += utils::toString(price) + " ";
+      }
+      return pricesUpdate;
+    }());
   }
 
   void orderUpdates(Span<OrderStatus> statuses) {
     mStats.ordersClosed.fetch_add(statuses.size());
     for (auto &status : statuses) {
       auto rtt = RttTracker::logRtt(status.id);
-      spdlog::info("{} RTT {}", utils::toString(status), utils::getScaleUs(rtt));
+      spdlog::info(
+          "{} RTT {}", [&status] { return utils::toString(status); }(),
+          [&rtt] { return utils::getScaleUs(rtt); }());
       (status.action == OrderAction::Buy)
           ? mStats.balance.fetch_add(status.fillPrice * status.quantity)
           : mStats.balance.fetch_sub(status.fillPrice * status.quantity);
@@ -77,7 +81,7 @@ private:
     order.price = utils::RNG::rng<uint32_t>(tickerPrice.price * 2);
     order.action = utils::RNG::rng(1) == 0 ? OrderAction::Buy : OrderAction::Sell;
     order.quantity = utils::RNG::rng(1000);
-    spdlog::debug("Placing order {}", utils::toString(order));
+    spdlog::debug("Placing order {}", [&order] { return utils::toString(order); }());
     mSink.ioSink.post(Span<Order>{&order, 1});
   }
 
@@ -99,11 +103,11 @@ private:
       if (mTradeRate > 50) {
         mTradeRate.store(mTradeRate / 2);
       }
-      spdlog::info("Trade rate: {}", utils::getScaleUs(mTradeRate));
+      spdlog::info("Trade rate: {}", [this] { return utils::getScaleUs(mTradeRate); }());
       break;
     case TraderCommand::TradeSpeedDown:
       mTradeRate.store(mTradeRate * 2);
-      spdlog::info("Trade rate: {}", utils::getScaleUs(mTradeRate));
+      spdlog::info("Trade rate: {}", [this] { return utils::getScaleUs(mTradeRate); }());
       break;
     default:
       break;

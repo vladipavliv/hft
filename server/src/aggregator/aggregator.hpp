@@ -6,6 +6,7 @@
 #ifndef HFT_SERVER_AGGREGATOR_HPP
 #define HFT_SERVER_AGGREGATOR_HPP
 
+#include <fmt/core.h>
 #include <map>
 #include <ranges>
 #include <spdlog/spdlog.h>
@@ -18,6 +19,7 @@
 #include "market_types.hpp"
 #include "order_traffic_stats.hpp"
 #include "price_feed.hpp"
+#include "result.hpp"
 #include "server_types.hpp"
 #include "utils/utils.hpp"
 
@@ -36,7 +38,7 @@ namespace hft::server {
 class Aggregator {
 public:
   Aggregator(ServerSink &sink) : mSink{sink}, mPriceFeed{mSink, getPricesView()} {
-    mSink.dataSink.setHandler<Order>([this](Span<Order> orders) { processOrders(orders); });
+    mSink.dataSink.setConsumer(this);
     mSink.controlSink.addCommandHandler({ServerCommand::CollectStats},
                                         [this](ServerCommand command) {
                                           if (command == ServerCommand::CollectStats) {
@@ -45,20 +47,51 @@ public:
                                         });
   }
 
-  void start() {}
-  void stop() {}
-
-  /**
-   * @brief Load balancer, returns the worker thread id to handle requests for ticker
-   * @todo Upon balancing would have to carefully let one thread finish processing current
-   * ticker events in its queue, while new events incoming to new threads queue. Think it through
-   */
-  static ThreadId getWorkerId(const Order &order) {
-    if (!skData.contains(order.ticker)) {
-      spdlog::error("Unknown ticker {}", utils::toStrView(order.ticker));
-      return std::numeric_limits<uint8_t>::max();
+  void onEvent(ThreadId threadId, Span<Order> orders) {
+    spdlog::trace("onEvent {} orders {}", threadId, orders.size());
+    auto [subSpan, leftover] = frontSubspan(orders, TickerCmp<Order>{});
+    while (!subSpan.empty()) {
+      auto order = subSpan.front();
+      if (!skData.contains(order.ticker)) {
+        spdlog::error("Unknown ticker {}", [&order] { return utils::toStrView(order.ticker); }());
+        continue;
+      }
+      auto &data = skData[order.ticker];
+      if (data.getThreadId() == threadId && data.orderBook->acquire()) {
+        data.orderBook->add(subSpan);
+        if (!data.rerouteQueue.empty()) {
+          std::vector<Order> rerouted;
+          Order order;
+          while (data.rerouteQueue.pop(order)) {
+            rerouted.emplace_back(std::move(order));
+          }
+          data.orderBook->add(Span<Order>(rerouted));
+        }
+        auto matches = data.orderBook->match();
+        data.orderBook->release();
+        if (!matches.empty()) {
+          spdlog::trace("{} matches", matches.size());
+          mSink.ioSink.post(Span<OrderStatus>(matches));
+        }
+      } else {
+        spdlog::trace("Rerouting {} orders to a buffer", subSpan.size());
+        // Either previous thread revisits the rerouted order book cause it still
+        // has some orders in its queue, or new thread cannot yet take over cause previous
+        // thread was caught for reorder in the midst of operation. Cache the orders
+        for (auto &order : subSpan) {
+          while (!data.rerouteQueue.push(order)) {
+            std::this_thread::yield();
+          }
+        }
+      }
+      data.eventCounter.fetch_add(1);
+      std::tie(subSpan, leftover) = frontSubspan(leftover, TickerCmp<Order>{});
     }
-    return skData[order.ticker].threadId;
+  }
+
+  ThreadId getWorkerId(const Order &order) {
+    assert(skData.contains(order.ticker));
+    return skData[order.ticker].getThreadId();
   }
 
 private:
@@ -72,10 +105,8 @@ private:
         roundRobin = 0;
       }
       auto &data = skData[item.ticker];
-      data.threadId = roundRobin;
+      data.setThreadId(roundRobin);
       data.currentPrice = item.price;
-      data.orderBook = std::make_unique<OrderBook>(
-          item.ticker, [this](Span<OrderStatus> statuses) { mSink.ioSink.post(statuses); });
       roundRobin++;
     }
     return data;
@@ -86,22 +117,6 @@ private:
     return PricesView{skData};
   }
 
-  void processOrders(Span<Order> orders) {
-    auto [subSpan, leftover] = frontSubspan(orders, TickerCmp<Order>{});
-    while (!subSpan.empty()) {
-      auto order = subSpan.front();
-      if (!skData.contains(order.ticker)) {
-        spdlog::error("Unknown ticker {}", std::string(order.ticker.begin(), order.ticker.end()));
-        continue;
-      }
-      auto &data = skData[order.ticker];
-      data.orderBook->add(subSpan);
-      data.eventCounter.fetch_add(1);
-
-      std::tie(subSpan, leftover) = frontSubspan(leftover, TickerCmp<Order>{});
-    }
-  }
-
   void getTrafficStats() {
     OrderTrafficStats stats;
     for (auto &item : skData) {
@@ -109,22 +124,6 @@ private:
       stats.currentOrders += item.second.orderBook->ordersCount();
     }
     mSink.controlSink.onEvent(stats);
-  }
-
-  void generateOrders() {
-    auto iterator = skData.begin();
-    for (int i = 0; i < 1000000; ++i) {
-      if (iterator == skData.end()) {
-        iterator = skData.begin();
-      }
-      std::vector<Order> orders;
-      orders.reserve(5);
-      for (int i = 0; i < 5; ++i) {
-        orders.emplace_back(utils::generateOrder(iterator->first));
-      }
-      processOrders(orders);
-      iterator++;
-    }
   }
 
 private:
