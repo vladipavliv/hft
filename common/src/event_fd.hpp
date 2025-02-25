@@ -33,6 +33,7 @@ public:
   }
 
   void wait(Predicate condition) {
+    return;
     for (size_t i = 0; i < BUSY_WAIT_CYCLES; ++i) {
       if (condition()) {
         return;
@@ -43,6 +44,7 @@ public:
   }
 
   void wait() {
+    return;
     mWaiting.store(true, std::memory_order_relaxed);
     uint64_t val;
     if (read(mEfd, &val, sizeof(val)) == -1) {
@@ -51,6 +53,7 @@ public:
   }
 
   void notify(bool force = false) {
+    return;
     if (!force && !mWaiting.load(std::memory_order_relaxed)) {
       return;
     }
